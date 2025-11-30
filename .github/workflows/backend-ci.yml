@@ -1,8 +1,17 @@
+---
 name: Backend CI/CD
+
+# ---
+# KUBERNETES MANIFEST VALIDATION (kube-linter)
+# Este workflow incluye un job (kube-lint) que ejecuta kube-linter sobre los manifiestos en el directorio k8s/ si existen.
+# Si añades manifiestos (archivos YAML) para despliegue, colócalos en k8s/ y serán validados automáticamente.
+# Si no hay manifiestos, el job se saltará la validación.
+# Para usar conftest en vez de kube-linter, reemplaza el paso correspondiente.
+# ---
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'src/**'
       - 'tests/**'
@@ -10,35 +19,61 @@ on:
       - 'tsconfig.json'
       - '.github/workflows/backend-ci.yml'
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'src/**'
       - 'tests/**'
       - 'package.json'
       - 'tsconfig.json'
 
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: 'Run the build with tmate debugging enabled'
+        required: false
+        default: false
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  db-postgres-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client
+      - name: Postgres connection smoke test
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "DATABASE_URL no definido. Saltando verificación de Postgres." && exit 0
+          fi
+          echo "Probar conexión con psql (solo metadata)"
+          PSQL_URI="$DATABASE_URL"
+          psql "$PSQL_URI" -c 'SELECT 1;' || (echo "Fallo conexión a Postgres" && exit 1)
+        continue-on-error: true
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
-      
+
       - name: Install dependencies
         run: npm ci
-      
+
       - name: Run ESLint
         run: npm run lint --if-present
-      
+
       - name: Upload lint results
         if: always()
         uses: actions/upload-artifact@v3
@@ -70,25 +105,25 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
-      
+
       - name: Install dependencies
         run: npm ci
-      
+
       - name: Run tests
         run: npm test -- --coverage
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
           REDIS_URL: redis://localhost:6379
-      
+
       - name: Upload coverage
         uses: codecov/codecov-action@v3
         with:
@@ -98,22 +133,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: [ lint, test ]
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
-      
+
       - name: Install dependencies
         run: npm ci
-      
+
       - name: Build
         run: npm run build
-      
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v3
         with:
@@ -124,24 +159,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-    
+
     permissions:
       contents: read
       packages: write
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -152,7 +187,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-      
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -166,14 +201,14 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     needs: build
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Run npm audit
         run: npm audit --audit-level=moderate
         continue-on-error: true
-      
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
@@ -181,9 +216,28 @@ jobs:
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
-      
+
       - name: Upload Trivy results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v2
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
+
+  kube-lint:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kube-linter
+        run: |
+          curl -sSL https://github.com/stackrox/kube-linter/releases/latest/download/kube-linter-linux.tar.gz | tar -xz
+          sudo mv kube-linter /usr/local/bin/
+      - name: Run kube-linter on manifests
+        run: |
+          # Cambia la ruta si tus manifiestos están en otro directorio
+          if compgen -G "k8s/*.yml" > /dev/null || compgen -G "k8s/*.yaml" > /dev/null; then
+            kube-linter lint k8s/
+          else
+            echo "No se encontraron manifiestos Kubernetes en k8s/. Saltando kube-linter."
+          fi
+        continue-on-error: true
