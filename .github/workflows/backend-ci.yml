@@ -38,23 +38,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  db-postgres-check:
-    runs-on: ubuntu-latest
-    env:
-      DATABASE_URL: ''
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y postgresql-client
-      - name: Postgres connection smoke test
-        if: env.DATABASE_URL != ''
-        run: |
-          echo "Probar conexión con psql (solo metadata)"
-          PSQL_URI="$DATABASE_URL"
-          psql "$PSQL_URI" -c 'SELECT 1;' || (echo "Fallo conexión a Postgres" && exit 1)
-        continue-on-error: true
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -81,6 +64,29 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
     steps:
       - uses: actions/checkout@v4
 
@@ -108,6 +114,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: [ lint, test ]
+    
     steps:
       - uses: actions/checkout@v4
 
@@ -133,9 +140,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
     permissions:
       contents: read
       packages: write
+    
     steps:
       - uses: actions/checkout@v4
 
@@ -173,6 +182,7 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     needs: build
+    
     steps:
       - uses: actions/checkout@v4
 
